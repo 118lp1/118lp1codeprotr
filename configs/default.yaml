@@ -1,0 +1,121 @@
+mode: BACKTEST
+strategy_version: poi_retest_engulf_v1.0.0
+symbol_spec:
+  name: EURUSD
+  digits: 5
+  point: 1.0e-05
+  tick_size: 1.0e-05
+  tick_value: 1.0
+  contract_size: 100000.0
+  volume_min: 0.01
+  volume_max: 100.0
+  volume_step: 0.01
+  pip_size: null
+  stops_level_points: 0
+data:
+  symbol: EURUSD
+  m5_path: data/EURUSD_M5.csv
+  m1_path: data/EURUSD_M1.csv
+  data_tz: UTC
+  broker_utc_offset_hours: 0.0
+  start: null
+  end: null
+  max_gap_minutes: 90
+poi:
+  poi_type: order_block
+  atr_period: 14
+  use_body_only: false
+  zone_padding_pips: 0.0
+  max_zone_width_pips: 18.0
+  min_zone_width_pips: 0.5
+  expiry_m15_bars: 96
+  max_active_pois: 6
+  overlap_min_separation_pips: 0.0
+  prefer_on_overlap: newest
+  displacement_atr_mult: 1.0
+  max_leg_bars: 5
+  min_leg_bars: 1
+  require_structure_break: false
+  swing_left: 2
+  swing_right: 2
+  min_fvg_pips: 1.0
+  swing_zone_height_pips: 5.0
+retest:
+  min_departure_pips: 8.0
+  min_departure_atr: 0.0
+  min_m5_bars_outside: 3
+  max_departure_pips: 250.0
+  min_m5_bars_before_retest: 0
+  max_m5_bars_to_retest: 288
+  touch_tolerance_pips: 0.5
+  max_penetration_pct: 1.0
+  invalidate_on_close_beyond_distal: true
+  invalidation_buffer_pips: 1.0
+  allow_wick_only_touch: true
+  max_retests: 1
+engulf:
+  max_m5_bars_after_retest: 6
+  require_body_engulf: true
+  engulf_use_range: false
+  min_body_ratio: 1.0
+  min_range_ratio: 0.0
+  close_position_pct: 0.0
+  min_body_pips: 0.5
+  max_body_pips: 40.0
+  require_prev_opposite: true
+  require_touch_zone: true
+  zone_proximity_pips: 2.0
+trade:
+  entry_mode: next_open
+  limit_valid_m5_bars: 3
+  rr: 2.0
+  sl_buffer_pips: 1.0
+  max_sl_pips: 20.0
+  min_sl_pips: 3.0
+  max_holding_m5_bars: 288
+  close_at_session_end: false
+session:
+  enabled: true
+  windows:
+  - - 07:00
+    - '16:00'
+  weekdays:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  block_minutes_after_open: 0
+  block_minutes_before_close: 0
+risk:
+  risk_per_trade: 0.005
+  max_open_positions: 1
+  max_trades_per_day: 3
+  max_daily_loss_pct: 0.02
+  max_consecutive_losses: 4
+  cooldown_m5_bars_after_loss: 3
+  cooldown_m5_bars_after_any: 0
+  max_spread_pips: 2.0
+  max_slippage_pips: 1.0
+  allow_fractional_lots: true
+  reject_if_below_min_lot: true
+costs:
+  spread_pips: 0.8
+  spread_multiplier: 1.0
+  use_spread_column: false
+  slippage_entry_pips: 0.2
+  slippage_stop_pips: 0.3
+  slippage_multiplier: 1.0
+  commission_per_lot_round_turn: 7.0
+  swap_long_pips_per_day: 0.0
+  swap_short_pips_per_day: 0.0
+  apply_swap: false
+backtest:
+  initial_equity: 10000.0
+  execution_model: m1
+  same_bar_policy: sl_first
+  m1_same_bar_policy: sl_first
+  compound: true
+  seed: 7
+log_level: INFO
+output_dir: results

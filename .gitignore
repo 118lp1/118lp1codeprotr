@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+
+# generated market data (export it yourself via scripts/export_mt5_data.py)
+data/*.csv
+
+# backtest/report artifacts
+results/
+
+# runtime logs and state
+logs/
+state/
+
+# compiled MQL5 binary and compiler log (source .mq5 is tracked)
+mql5/*.ex5
+mql5/compile.log
