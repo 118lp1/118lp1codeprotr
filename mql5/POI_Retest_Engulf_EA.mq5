@@ -804,6 +804,26 @@ void Process()
    }
    lots=NormalizeDouble(lots, VolumeDecimals(volStep));
 
+   // Cap lots to what the broker's margin requirement actually allows, instead
+   // of relying on OrderSend to reject with "No money" (TRADE_RETCODE_NO_MONEY):
+   // shrink by volStep until the order fits within free margin, or veto if even
+   // volMin does not fit.
+   ENUM_ORDER_TYPE orderType=longDir?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   double orderPrice=longDir?ask:bid;
+   double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double requiredMargin=0.0;
+   while(lots>=volMin-1e-9)
+   {
+      if(OrderCalcMargin(orderType, _Symbol, lots, orderPrice, requiredMargin) && requiredMargin<=freeMargin)
+         break;
+      lots=NormalizeDouble(lots-volStep, VolumeDecimals(volStep));
+   }
+   if(lots<volMin-1e-9)
+   {
+      LogVeto(StringFormat("insufficient_margin (free=%.2f required_at_min_lot=%.2f)", freeMargin, requiredMargin));
+      return;
+   }
+
    int digits=(int)_Digits;
    sl=NormalizeDouble(sl,digits);
    tp=NormalizeDouble(tp,digits);
