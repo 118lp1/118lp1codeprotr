@@ -218,16 +218,44 @@ LONG :  SL = lower - sl_buffer_pips * P
 SHORT:  SL = upper + sl_buffer_pips * P
 ```
 
-### H. Maximum stop
+### H. Stop bounds
+
+The stop is **never** moved to fit a cap. Compressing it would silently change
+the strategy into a different one with a worse win rate, and the backtest would
+not show why. What the bounds do is decide which setups are *taken*:
 
 ```
-stop_pips = |entry - SL| / P
-reject the trade if stop_pips > 20   (or < min_sl_pips)
+stop_distance <= max_sl_atr_mult * ATR_o          ceiling, in the POI's own units
+stop_pips     >= min_stop_spread_mult * spread    floor, from cost arithmetic
+stop_pips     <= max_sl_pips                      absolute backstop (0 = off)
 ```
 
-The stop is **never** moved to fit the cap. Compressing it would silently
-change the strategy into a different one with a worse win rate, and the
-backtest would not show why.
+The original rule was a fixed 20 pips. It was replaced because a constant pip
+cap does not travel: 20 pips is loose in a quiet regime and tight in a busy one,
+and since ATR and stop size are correlated, rejecting on absolute pips
+systematically discards high-volatility setups and keeps low-volatility ones.
+Those are precisely the trades with the worst cost drag, so the cap was
+concentrating the book in the setups least able to pay for themselves. Measured
+on the synthetic set, moving to `2.5 x ATR_o` raised the mean stop from 10.9 to
+16.3 pips and cut cost drag from 9.2 % to 6.1 % of risk while *keeping* the
+sample (208 -> 202 trades); the fixed cap had been rejecting about a quarter of
+otherwise valid signals.
+
+The floor is the mirror image. Cost in R is `c/R`, so the 1:2 breakeven win rate
+is `(1 + c/R)/3`: at `R = 4c` that is 41.7 %, against roughly 29 % for a
+driftless process. Such a trade is a slow certainty, not a bet.
+
+### H.1 Entry distance
+
+```
+overshoot = entry - proximal_boundary      (mirrored for shorts)
+reject if overshoot > max_entry_dist_atr * ATR_o
+```
+
+Because `stop = overshoot + zone_width + buffer` and only `overshoot` is
+unbounded, this is what actually governs stop size. `require_touch_zone` tests
+the engulfing candle's **wick**, so without this rule a bar may clip the zone
+and close 40 pips away and still count as "at" the POI.
 
 ### I. Take profit
 

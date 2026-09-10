@@ -22,6 +22,12 @@
 //|    the Python LIVE path (execution.py) never actually calls      |
 //|    RiskManager.on_close(), so that brake is dead code there. This|
 //|    port implements it for real, matching the documented intent.  |
+//|  * The stop's ceiling is ATR-relative (InpMaxSlAtrMult), not the |
+//|    original fixed 20 pips. A fixed cap does not travel across    |
+//|    volatility regimes, and because it REJECTS rather than        |
+//|    compresses it concentrates the book in the narrowest zones -  |
+//|    i.e. the highest cost-drag trades. InpMaxSlPips remains as an |
+//|    absolute backstop but is off by default.                      |
 //|  * Every other numeric threshold below mirrors trading_bot's     |
 //|    Config dataclasses field-for-field (see config.py).           |
 //+------------------------------------------------------------------+
@@ -80,12 +86,24 @@ input double InpZoneProximityPips    = 2.0;
 input group "=== Trade / SL / TP ==="
 input double InpRR                   = 2.0;
 input double InpSlBufferPips         = 1.0;
-input double InpMaxSlPips            = 20.0;
+// The stop is "unter den M15 POI" - its SIZE is whatever that costs.  Its
+// ceiling is expressed in the POI's own volatility (the ATR that qualified the
+// displacement) rather than a fixed pip count.  A fixed cap does not travel:
+// 20 pips is loose in a quiet regime and tight in a busy one, and because it
+// rejects rather than compresses it silently concentrates the book in the
+// narrowest zones - which are exactly the highest cost-drag trades.
+input double InpMaxSlAtrMult         = 2.5;   // reject stop > mult x ATR at POI origin
+input double InpMaxSlPips            = 0.0;   // absolute backstop; 0 disables
 input double InpMinSlPips            = 3.0;
 // A stop of R pips pays cost_R = (spread+slippage)/R, so the 1:2 breakeven is
 // (1 + 1/mult)/3.  At mult=8 that is 37.5% against a 33.3% floor; at mult=4 it is
 // 41.7%, which no version of this setup has ever shown.  See SPECIFICATION.md s1.
 input double InpMinStopSpreadMult    = 8.0;   // 0 disables
+// sl = entry_overshoot + zone_width + buffer, and only the overshoot is
+// unbounded: require_touch_zone checks the candle's WICK, so an engulfing bar
+// may wick the zone and close 40 pips away and still count as "at" the POI.
+input double InpMaxEntryDistAtr      = 1.0;   // reject entry > mult x ATR beyond proximal edge
+input int    InpMaxHoldingM5Bars     = 288;   // time stop (24h); 0 disables
 
 input group "=== Session (UTC, Mon-Fri only) ==="
 input int    InpSessionStartHourUTC  = 7;
@@ -138,6 +156,7 @@ struct SPOI
    datetime created_time;
    int      created_m5_index;
    double   strength;
+   double   atr_origin;      // ATR (price) at the origin bar - sizes the stop cap
    int      state;
    int      bars_outside;
    double   max_departure_pips;
@@ -154,6 +173,7 @@ struct SCandidate
    double   lo, hi;
    datetime origin_time, created_time;
    double   strength;
+   double   atrOrigin;
 };
 
 struct SSignal
@@ -161,6 +181,7 @@ struct SSignal
    bool     valid;
    int      dir;
    double   poiUpper, poiLower;
+   double   poiAtr;
    string   poiId;
    datetime engulfTime;   // OPEN time of the engulfing bar
    datetime signalTime;   // CLOSE time of the engulfing bar
@@ -186,6 +207,7 @@ int      g_journalHandle = INVALID_HANDLE;
 datetime j_time; string j_dir=""; string j_poi="";
 double   j_upper=0, j_lower=0, j_entry=0, j_sl=0, j_tp=0;
 double   j_slPips=0, j_spread=0, j_riskLots=0, j_lots=0;
+double   j_atrPips=0, j_slAtr=0, j_overAtr=0;
 bool     j_capped=false;
 
 //====================================================================
@@ -196,6 +218,8 @@ bool     j_capped=false;
 // 04:00-13:00 UTC - it drops the London/NY overlap and trades the Asian tail
 // instead, which is the worst liquidity available for a sub-20-pip stop.
 //====================================================================
+string GvName() { return "POIEA_LastTradedEngulf_"+_Symbol+"_"+IntegerToString((int)InpMagic); }
+
 double DetectBrokerOffsetHours()
 {
    if(!InpAutoDetectBrokerOffset) return InpBrokerUtcOffsetHours;
@@ -227,16 +251,17 @@ void JournalOpen()
    FileSeek(g_journalHandle, 0, SEEK_END);
    if(isNew)
       FileWrite(g_journalHandle, "signal_time","direction","poi_id","poi_upper","poi_lower",
-                "entry","sl","tp","sl_pips","spread_pips","risk_lots","final_lots",
-                "margin_capped","equity","decision");
+                "entry","sl","tp","sl_pips","atr_pips","sl_over_atr","entry_over_atr",
+                "spread_pips","risk_lots","final_lots","margin_capped","equity","decision");
 }
 
-void JournalReset(datetime ts, int dir, string poiId, double upper, double lower)
+void JournalReset(datetime ts, int dir, string poiId, double upper, double lower, double atr)
 {
    j_time=ts; j_dir=(dir==DIR_LONG?"LONG":"SHORT"); j_poi=poiId;
    j_upper=upper; j_lower=lower;
    j_entry=0; j_sl=0; j_tp=0; j_slPips=0; j_spread=0;
    j_riskLots=0; j_lots=0; j_capped=false;
+   j_atrPips=(PipSize>0? atr/PipSize : 0); j_slAtr=0; j_overAtr=0;
 }
 
 void JournalRow(string decision)
@@ -248,7 +273,9 @@ void JournalRow(string decision)
              DoubleToString(j_upper,_Digits), DoubleToString(j_lower,_Digits),
              DoubleToString(j_entry,_Digits), DoubleToString(j_sl,_Digits),
              DoubleToString(j_tp,_Digits),
-             DoubleToString(j_slPips,2), DoubleToString(j_spread,2),
+             DoubleToString(j_slPips,2), DoubleToString(j_atrPips,2),
+             DoubleToString(j_slAtr,3), DoubleToString(j_overAtr,3),
+             DoubleToString(j_spread,2),
              DoubleToString(j_riskLots,4), DoubleToString(j_lots,4),
              j_capped?"1":"0",
              DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2),
@@ -270,6 +297,9 @@ int OnInit()
    HistorySelect(0, TimeCurrent());   // warm the history cache once
 
    g_brokerOffsetHours = DetectBrokerOffsetHours();
+   // Global variables survive between Strategy Tester runs, so a stale dedupe
+   // key makes the next backtest silently skip its first signals.
+   if(MQLInfoInteger(MQL_TESTER)) GlobalVariableDel(GvName());
    JournalOpen();
 
    PrintFormat("POI_Retest_Engulf_EA init: symbol=%s pip=%.5f magic=%d risk_per_trade=%.2f%%",
@@ -306,9 +336,56 @@ void CheckAndProcess()
    datetime barTime = lastClosed[0].time;
    if(g_lastProcessedBarTime!=0 && barTime<=g_lastProcessedBarTime) { UpdateDashboard(); return; }
    g_lastProcessedBarTime = barTime;
-   Process();
+   // Order matters: the consecutive-loss brake and the cooldown must see the
+   // deals that closed on THIS bar before the bar's own signal is judged.
    UpdateClosedTradeStats();
+   RollDayIfNeeded(barTime);      // every bar, not only when a signal exists
+   EnforceTimeStop();
+   Process();
    UpdateDashboard();
+}
+
+//====================================================================
+// Time stop - parity with trade.max_holding_m5_bars in the Python engine, which
+// the backtest assumes but the EA never enforced: without it a position rides
+// to SL or TP however long that takes, so EA outcomes cannot match the backtest
+// that authorised them.
+//====================================================================
+void ClosePositionTicket(ulong ticket, string why)
+{
+   if(!PositionSelectByTicket(ticket)) return;
+   long ptype = PositionGetInteger(POSITION_TYPE);
+   MqlTradeRequest req; MqlTradeResult res;
+   ZeroMemory(req); ZeroMemory(res);
+   req.action   = TRADE_ACTION_DEAL;
+   req.position = ticket;
+   req.symbol   = _Symbol;
+   req.volume   = PositionGetDouble(POSITION_VOLUME);
+   req.type     = (ptype==POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   req.price    = (ptype==POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol,SYMBOL_BID)
+                                             : SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   req.deviation= InpDeviationPoints;
+   req.magic    = (ulong)InpMagic;
+   req.type_filling = GetFillingMode();
+   if(!OrderSend(req,res) || res.retcode!=TRADE_RETCODE_DONE)
+      PrintFormat("%s close FAILED ticket=%d retcode=%d %s", why, (int)ticket, res.retcode, res.comment);
+   else
+      PrintFormat("%s: closed ticket=%d", why, (int)ticket);
+}
+
+void EnforceTimeStop()
+{
+   if(InpMaxHoldingM5Bars<=0) return;
+   long maxAge = (long)InpMaxHoldingM5Bars*300;
+   for(int k=PositionsTotal()-1; k>=0; k--)
+   {
+      ulong ticket=PositionGetTicket(k);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((long)PositionGetInteger(POSITION_MAGIC)!=InpMagic) continue;
+      long age=(long)TimeCurrent()-(long)PositionGetInteger(POSITION_TIME);
+      if(age>=maxAge) ClosePositionTicket(ticket, "time_stop");
+   }
 }
 
 //====================================================================
@@ -443,6 +520,7 @@ void DetectOrderBlocks(int j, const double &o[], const double &h[], const double
       out[idx2].origin_time=m15Start[oIdx];
       out[idx2].created_time=m15End[j];
       out[idx2].strength=impulse/a;
+      out[idx2].atrOrigin=a;
    }
 }
 
@@ -558,7 +636,8 @@ bool CheckEngulf(SPOI &p, datetime ts, datetime curBarOpenTime,
       if(!touch) return false;
    }
    p.state=ST_TRIGGERED;
-   sig.valid=true; sig.dir=p.dir; sig.poiUpper=p.upper; sig.poiLower=p.lower; sig.poiId=p.id;
+   sig.valid=true; sig.dir=p.dir; sig.poiUpper=p.upper; sig.poiLower=p.lower;
+   sig.poiAtr=p.atr_origin; sig.poiId=p.id;
    sig.engulfTime=curBarOpenTime; sig.signalTime=ts;
    return true;
 }
@@ -688,7 +767,8 @@ bool RunReplay(SSignal &outSig)
             int sn=ArraySize(seenIds); ArrayResize(seenIds,sn+1); seenIds[sn]=np.id;
             np.dir=cands[ci].dir; np.upper=cands[ci].hi; np.lower=cands[ci].lo;
             np.origin_time=cands[ci].origin_time; np.created_time=cands[ci].created_time;
-            np.created_m5_index=i; np.strength=cands[ci].strength; np.state=ST_CREATED;
+            np.created_m5_index=i; np.strength=cands[ci].strength;
+            np.atr_origin=cands[ci].atrOrigin; np.state=ST_CREATED;
             np.bars_outside=0; np.max_departure_pips=0.0;
             np.departed_time=0; np.departed_index=-1;
             np.retest_time=0; np.retest_index=-1; np.retest_count=0;
@@ -831,12 +911,11 @@ void Process()
    SSignal sig;
    if(!RunReplay(sig)) return;
 
-   string gvName = "POIEA_LastTradedEngulf_"+_Symbol+"_"+IntegerToString((int)InpMagic);
+   string gvName = GvName();
    double lastTraded = GlobalVariableCheck(gvName) ? GlobalVariableGet(gvName) : 0.0;
    if((double)sig.engulfTime <= lastTraded) return;   // restart-safety dedupe
 
-   RollDayIfNeeded(sig.signalTime);
-   JournalReset(sig.signalTime, sig.dir, sig.poiId, sig.poiUpper, sig.poiLower);
+   JournalReset(sig.signalTime, sig.dir, sig.poiId, sig.poiUpper, sig.poiLower, sig.poiAtr);
 
    if(!InpIUnderstandTheRisk)
    {
@@ -874,7 +953,13 @@ void Process()
 
    bool longDir=(sig.dir==DIR_LONG);
    double entry = longDir?ask:bid;
-   double sl = longDir ? (sig.poiLower-InpSlBufferPips*PipSize) : (sig.poiUpper+InpSlBufferPips*PipSize);
+   // A long is closed at the BID, a short at the ASK, but both zone boundaries
+   // are bid prices.  An unadjusted short stop therefore triggers a full spread
+   // earlier than its mirrored long - it sits ON the boundary just retested.
+   // Push it out by one spread so both sides stop at the same distance.
+   double spread = ask-bid;
+   double sl = longDir ? (sig.poiLower-InpSlBufferPips*PipSize)
+                       : (sig.poiUpper+InpSlBufferPips*PipSize+spread);
    if(longDir  && sl>=entry) { LogVeto("sl_wrong_side"); return; }
    if(!longDir && sl<=entry) { LogVeto("sl_wrong_side"); return; }
 
@@ -882,8 +967,28 @@ void Process()
    double slPips=slDistance/PipSize;
    j_entry=entry; j_sl=sl; j_slPips=slPips;
    double tol=1e-6;
-   if(slPips>InpMaxSlPips+tol) { LogVeto(StringFormat("sl_exceeds_max (%.1f pips)",slPips)); return; }
+   if(sig.poiAtr>0) j_slAtr=slDistance/sig.poiAtr;
+   if(InpMaxSlPips>0 && slPips>InpMaxSlPips+tol) { LogVeto(StringFormat("sl_exceeds_max (%.1f pips)",slPips)); return; }
    if(slPips<InpMinSlPips-tol) { LogVeto(StringFormat("sl_below_min (%.1f pips)",slPips)); return; }
+   // Ceiling in the POI's own volatility, replacing the fixed 20-pip cap.
+   if(InpMaxSlAtrMult>0 && sig.poiAtr>0 && slDistance > InpMaxSlAtrMult*sig.poiAtr)
+   {
+      LogVeto(StringFormat("sl_exceeds_atr_cap (%.2f x ATR, cap %.2f)", j_slAtr, InpMaxSlAtrMult));
+      return;
+   }
+   // How far past the zone the fill sits.  require_touch_zone only checks the
+   // WICK, so without this the EA will buy the close of an impulse candle that
+   // merely clipped the zone on its way through.
+   if(InpMaxEntryDistAtr>0 && sig.poiAtr>0)
+   {
+      double overshoot = longDir ? (entry-sig.poiUpper) : (sig.poiLower-entry);
+      j_overAtr = overshoot/sig.poiAtr;
+      if(overshoot > InpMaxEntryDistAtr*sig.poiAtr)
+      {
+         LogVeto(StringFormat("entry_too_far_from_zone (%.2f x ATR, cap %.2f)", j_overAtr, InpMaxEntryDistAtr));
+         return;
+      }
+   }
    // Cost drag is (spread+slippage)/stop.  A 4-pip stop against a 1-pip spread
    // needs ~42% wins to break even on 1:2; the setup cannot deliver that, so the
    // trade is a guaranteed slow loss rather than a bet.  Reject it explicitly.
@@ -901,7 +1006,10 @@ void Process()
    double tp = longDir ? (entry+InpRR*slDistance) : (entry-InpRR*slDistance);
 
    double tickSize=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_SIZE);
-   double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
+   // TICK_VALUE_LOSS is the one that matters for a stop; on most FX symbols it
+   // equals TICK_VALUE, but not on all of them.
+   double tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE_LOSS);
+   if(tickValue<=0) tickValue=SymbolInfoDouble(_Symbol,SYMBOL_TRADE_TICK_VALUE);
    double volMin=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
    double volMax=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double volStep=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);

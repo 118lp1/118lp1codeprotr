@@ -127,8 +127,15 @@ def build_order(sig: Signal, next_open: float, equity: float, cfg: Config,
     spec = cfg.symbol_spec
     pip = pip_size(spec)
     ref, pending = raw_entry_price(sig, next_open, cfg)
+    eff_spread = cfg.costs.spread() if spread_pips is None else spread_pips
     entry = apply_costs_to_entry(ref, sig.direction, cfg, spread_pips)
     sl = stop_loss_price(sig.poi.upper, sig.poi.lower, sig.direction, cfg)
+    # A short is closed at the ASK, but the zone and the stop are bid prices, so
+    # an unadjusted short stop triggers a full spread earlier than the mirrored
+    # long one -- it sits ON the boundary price just retested.  Push it out by a
+    # spread so both directions are stopped at the same distance from the zone.
+    if sig.direction is Direction.SHORT:
+        sl = round_to_tick(sl + pips_to_price(eff_spread, spec), spec)
 
     # the stop must be on the correct side of the entry
     if sig.direction is Direction.LONG and sl >= entry:
@@ -143,12 +150,28 @@ def build_order(sig: Signal, next_open: float, equity: float, cfg: Config,
     tol = 1e-6
 
     # HARD RULE: never compress the stop to fit; reject the trade instead.
-    if sl_pips > cfg.trade.max_sl_pips + tol:
+    if cfg.trade.max_sl_pips > 0 and sl_pips > cfg.trade.max_sl_pips + tol:
         return OrderPlan(False, "sl_exceeds_max", sl_pips=sl_pips)
     if sl_pips < cfg.trade.min_sl_pips - tol:
         return OrderPlan(False, "sl_below_min", sl_pips=sl_pips)
     if spec.stops_level_points and sl_distance < spec.stops_level_points * spec.point:
         return OrderPlan(False, "below_broker_stops_level", sl_pips=sl_pips)
+    # Ceiling in the POI's own volatility.  A fixed pip cap rejects wide zones in
+    # a busy regime and passes them in a quiet one, and because it rejects rather
+    # than compresses it quietly concentrates the book in the narrowest -- i.e.
+    # highest cost-drag -- setups.  ATR travels; 20 pips does not.
+    atr_o = getattr(sig.poi, "atr_origin", 0.0) or 0.0
+    if cfg.trade.max_sl_atr_mult > 0 and atr_o > 0:
+        if sl_distance > cfg.trade.max_sl_atr_mult * atr_o + tol * spec.point:
+            return OrderPlan(False, "sl_exceeds_atr_cap", sl_pips=sl_pips)
+    # How far past the zone the fill sits.  sl = overshoot + zone_width + buffer,
+    # and only the overshoot is unbounded: without this a candle that merely
+    # wicked the zone and closed 40 pips away is still "at" the POI.
+    if cfg.trade.max_entry_dist_atr > 0 and atr_o > 0:
+        overshoot = (entry - sig.poi.upper) if sig.direction is Direction.LONG \
+                    else (sig.poi.lower - entry)
+        if overshoot > cfg.trade.max_entry_dist_atr * atr_o:
+            return OrderPlan(False, "entry_too_far_from_zone", sl_pips=sl_pips)
     # A stop only a spread or two wide needs a win rate the setup cannot deliver:
     # at 1:2 the breakeven is (1 + c/R)/3, so R = 4c already demands 41.7 %.  The
     # 20-pip cap selects *for* these trades, so without this floor the surviving

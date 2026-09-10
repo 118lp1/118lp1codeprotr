@@ -133,6 +133,11 @@ class RetestConfig:
 
     # what counts as "touching" the zone
     touch_tolerance_pips: float = 0.5     # tolerance around the proximal boundary
+    # 1.0 lets the wick reach the distal edge, i.e. the whole zone is swept and
+    # the stop sits just beyond a level price has already traded to.  Tightening
+    # it to 0.8/0.6/0.4 was measured on the synthetic set and moved expectancy by
+    # less than half a standard error while costing up to a fifth of the sample,
+    # so it stays at the permissive value until real data says otherwise.
     max_penetration_pct: float = 1.0      # 1.0 = may trade down to the distal edge
     invalidate_on_close_beyond_distal: bool = True
     invalidation_buffer_pips: float = 1.0
@@ -161,13 +166,27 @@ class TradeConfig:
     entry_mode: EntryMode = EntryMode.NEXT_OPEN
     limit_valid_m5_bars: int = 3          # for LIMIT_50 / BREAKOUT modes
     rr: float = 2.0                       # take-profit multiple of risk
+    # Widening this to 2.0 looks prudent -- the retest may sweep the whole zone,
+    # so 1 pip puts the stop just past a level price has already traded to -- but
+    # measured on the synthetic set it made expectancy WORSE (-0.10 -> -0.20R),
+    # inside noise but with no support at all.  Left alone deliberately.
     sl_buffer_pips: float = 1.0           # beyond the POI distal boundary
-    max_sl_pips: float = 20.0             # HARD constraint: reject, never compress
+    # The stop is whatever "below the POI" costs; its ceiling is expressed in the
+    # POI's OWN volatility rather than a fixed pip count, so it travels across
+    # regimes and does not silently select for narrow zones.  max_sl_pips stays
+    # available as an absolute backstop but is off by default.
+    max_sl_atr_mult: float = 2.5          # reject stop > mult x ATR at POI origin
+    max_sl_pips: float = 0.0              # absolute backstop; 0 disables
     min_sl_pips: float = 3.0              # below this the stop is inside the noise
     # Cost drag is (spread + entry slippage) / stop.  An absolute pip floor does
     # not express that: 3 pips is survivable at a 0.2-pip spread and hopeless at
     # 1.5.  This floor is relative, so it tightens exactly when costs do.
     min_stop_spread_mult: float = 8.0     # reject stop < mult x spread; 0 disables
+    # How far past the zone the fill may sit.  This is what actually inflates the
+    # stop: sl = entry_overshoot + zone_width + buffer, and only the first term
+    # is unbounded.  Capping it stops the EA buying the top of an impulse candle
+    # that merely wicked the zone on its way through.
+    max_entry_dist_atr: float = 1.0       # reject entry > mult x ATR beyond proximal edge; 0 disables
     max_holding_m5_bars: int = 288        # time stop (24h); 0 disables
     close_at_session_end: bool = False
 

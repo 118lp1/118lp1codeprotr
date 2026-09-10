@@ -70,9 +70,11 @@ trade:
   limit_valid_m5_bars: 3
   rr: 2.0
   sl_buffer_pips: 1.0
-  max_sl_pips: 20.0
+  max_sl_atr_mult: 2.5
+  max_sl_pips: 0.0
   min_sl_pips: 3.0
   min_stop_spread_mult: 8.0
+  max_entry_dist_atr: 1.0
   max_holding_m5_bars: 288
   close_at_session_end: false
 session:
