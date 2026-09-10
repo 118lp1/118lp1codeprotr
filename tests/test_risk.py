@@ -73,10 +73,39 @@ def test_tp_uses_the_actual_fill_not_the_signal_price():
     fill.  Otherwise the advertised RR is not the RR that is traded."""
     cfg = test_config()
     cfg.costs.spread_pips = 2.0
+    # This test is about TP arithmetic, not about trade selection.  A 2-pip
+    # spread trips the cost-drag floor, which would reject the order before the
+    # arithmetic is ever exercised, so switch that gate off here.
+    cfg.trade.min_stop_spread_mult = 0.0
     plan = build_order(_signal(1.1000, 1.1006), next_open=1.1010, equity=10_000, cfg=cfg)
     assert plan.ok
     assert abs(plan.entry - 1.1012) < 1e-9                       # 1.1010 + 2 pips
     assert abs((plan.tp - plan.entry) - 2 * (plan.entry - plan.sl)) < 1e-9
+
+
+def test_stop_too_tight_vs_spread_is_rejected():
+    """A stop worth only a few spreads cannot clear its own breakeven.
+
+    At 1:2 the required win rate is (1 + c/R)/3.  With c = 1 pip and R = 4 pips
+    that is 41.7 %, against roughly 29 % for a driftless process -- the trade is
+    a slow certain loss, so it is declined rather than sized.
+    """
+    cfg = test_config()
+    cfg.costs.spread_pips = 1.0
+    cfg.trade.min_stop_spread_mult = 8.0
+    # POI 1.1000-1.1006, entry ~1.1011 -> stop ~12 pips, floor is 8 pips: allowed
+    ok = build_order(_signal(1.1000, 1.1006), next_open=1.1010, equity=10_000, cfg=cfg)
+    assert ok.ok and ok.sl_pips >= 8.0
+
+    # A narrow zone right under the entry gives a 5-pip stop: below the floor
+    tight = build_order(_signal(1.1007, 1.1009), next_open=1.1010, equity=10_000, cfg=cfg)
+    assert not tight.ok
+    assert tight.reason == "stop_too_tight_vs_spread"
+    assert abs(tight.sl_pips - 5.0) < 1e-6
+
+    # ...and the same setup is accepted once the floor is switched off
+    cfg.trade.min_stop_spread_mult = 0.0
+    assert build_order(_signal(1.1007, 1.1009), next_open=1.1010, equity=10_000, cfg=cfg).ok
 
 
 # --------------------------------------------------------------------------- #

@@ -164,6 +164,10 @@ class TradeConfig:
     sl_buffer_pips: float = 1.0           # beyond the POI distal boundary
     max_sl_pips: float = 20.0             # HARD constraint: reject, never compress
     min_sl_pips: float = 3.0              # below this the stop is inside the noise
+    # Cost drag is (spread + entry slippage) / stop.  An absolute pip floor does
+    # not express that: 3 pips is survivable at a 0.2-pip spread and hopeless at
+    # 1.5.  This floor is relative, so it tightens exactly when costs do.
+    min_stop_spread_mult: float = 8.0     # reject stop < mult x spread; 0 disables
     max_holding_m5_bars: int = 288        # time stop (24h); 0 disables
     close_at_session_end: bool = False
 

@@ -82,19 +82,24 @@ input double InpRR                   = 2.0;
 input double InpSlBufferPips         = 1.0;
 input double InpMaxSlPips            = 20.0;
 input double InpMinSlPips            = 3.0;
+// A stop of R pips pays cost_R = (spread+slippage)/R, so the 1:2 breakeven is
+// (1 + 1/mult)/3.  At mult=8 that is 37.5% against a 33.3% floor; at mult=4 it is
+// 41.7%, which no version of this setup has ever shown.  See SPECIFICATION.md s1.
+input double InpMinStopSpreadMult    = 8.0;   // 0 disables
 
 input group "=== Session (UTC, Mon-Fri only) ==="
 input int    InpSessionStartHourUTC  = 7;
 input int    InpSessionStartMinUTC   = 0;
 input int    InpSessionEndHourUTC    = 16;
 input int    InpSessionEndMinUTC     = 0;
-input double InpBrokerUtcOffsetHours = 0.0;   // broker/server time = UTC + this offset
+input bool   InpAutoDetectBrokerOffset = true; // derive server offset from TimeCurrent()-TimeGMT()
+input double InpBrokerUtcOffsetHours = 0.0;   // manual fallback: server time = UTC + this
 
 input group "=== Risk ==="
-input double InpRiskPerTrade         = 0.10;   // 10% - matches configs/live.yaml as of this session
+input double InpRiskPerTrade         = 0.005;  // 0.5% - see README section 6
 input int    InpMaxOpenPositions     = 1;
-input int    InpMaxTradesPerDay      = 4;
-input double InpMaxDailyLossPct      = 0.35;
+input int    InpMaxTradesPerDay      = 3;
+input double InpMaxDailyLossPct      = 0.02;
 input int    InpMaxConsecutiveLosses = 4;
 input int    InpCooldownM5BarsAfterLoss = 3;
 input int    InpCooldownM5BarsAfterAny  = 0;
@@ -107,6 +112,7 @@ input long   InpMagic                = 900101;
 input int    InpHistoryM5Bars        = 3000;
 input int    InpDeviationPoints      = 20;
 input int    InpPollSeconds          = 15;
+input bool   InpWriteJournal         = true;   // CSV of every signal + decision, in MQL5/Files
 
 //====================================================================
 // POI lifecycle states
@@ -173,6 +179,82 @@ bool     g_haltedToday = false;
 datetime g_cooldownUntilTime = 0;
 ulong    g_lastProcessedDealTicket = 0;
 bool     g_warnedRisk = false;
+double   g_brokerOffsetHours = 0.0;
+int      g_journalHandle = INVALID_HANDLE;
+
+// Context for the journal row of the signal currently being decided.
+datetime j_time; string j_dir=""; string j_poi="";
+double   j_upper=0, j_lower=0, j_entry=0, j_sl=0, j_tp=0;
+double   j_slPips=0, j_spread=0, j_riskLots=0, j_lots=0;
+bool     j_capped=false;
+
+//====================================================================
+// Broker UTC offset
+//
+// Getting this wrong silently shifts the whole session window.  A server on
+// UTC+3 with the offset left at 0 turns a 07:00-16:00 UTC filter into
+// 04:00-13:00 UTC - it drops the London/NY overlap and trades the Asian tail
+// instead, which is the worst liquidity available for a sub-20-pip stop.
+//====================================================================
+double DetectBrokerOffsetHours()
+{
+   if(!InpAutoDetectBrokerOffset) return InpBrokerUtcOffsetHours;
+   datetime srv = TimeCurrent();
+   datetime gmt = TimeGMT();
+   if(srv<=0 || gmt<=0) return InpBrokerUtcOffsetHours;
+   double hours = ((double)((long)srv - (long)gmt))/3600.0;
+   hours = MathRound(hours*2.0)/2.0;             // brokers use whole/half hours
+   if(MathAbs(hours)>14.0) return InpBrokerUtcOffsetHours;
+   return hours;
+}
+
+//====================================================================
+// Signal journal - the EA's equivalent of the Python backtester's funnel and
+// rejection table.  Without it a losing curve cannot be attributed to costs
+// rather than to a rule, which is the only question worth asking of it.
+//====================================================================
+void JournalOpen()
+{
+   if(!InpWriteJournal) return;
+   string path = StringFormat("POI_EA_journal_%s_%d.csv", _Symbol, (int)InpMagic);
+   bool isNew = !FileIsExist(path);
+   g_journalHandle = FileOpen(path, FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_SHARE_READ, ',');
+   if(g_journalHandle==INVALID_HANDLE)
+   {
+      PrintFormat("journal: FileOpen(%s) failed, error=%d", path, GetLastError());
+      return;
+   }
+   FileSeek(g_journalHandle, 0, SEEK_END);
+   if(isNew)
+      FileWrite(g_journalHandle, "signal_time","direction","poi_id","poi_upper","poi_lower",
+                "entry","sl","tp","sl_pips","spread_pips","risk_lots","final_lots",
+                "margin_capped","equity","decision");
+}
+
+void JournalReset(datetime ts, int dir, string poiId, double upper, double lower)
+{
+   j_time=ts; j_dir=(dir==DIR_LONG?"LONG":"SHORT"); j_poi=poiId;
+   j_upper=upper; j_lower=lower;
+   j_entry=0; j_sl=0; j_tp=0; j_slPips=0; j_spread=0;
+   j_riskLots=0; j_lots=0; j_capped=false;
+}
+
+void JournalRow(string decision)
+{
+   if(g_journalHandle==INVALID_HANDLE) return;
+   FileWrite(g_journalHandle,
+             TimeToString(j_time, TIME_DATE|TIME_MINUTES|TIME_SECONDS),
+             j_dir, j_poi,
+             DoubleToString(j_upper,_Digits), DoubleToString(j_lower,_Digits),
+             DoubleToString(j_entry,_Digits), DoubleToString(j_sl,_Digits),
+             DoubleToString(j_tp,_Digits),
+             DoubleToString(j_slPips,2), DoubleToString(j_spread,2),
+             DoubleToString(j_riskLots,4), DoubleToString(j_lots,4),
+             j_capped?"1":"0",
+             DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2),
+             decision);
+   FileFlush(g_journalHandle);
+}
 
 //====================================================================
 // OnInit / OnDeinit
@@ -187,8 +269,16 @@ int OnInit()
    g_lastProcessedDealTicket = 0;
    HistorySelect(0, TimeCurrent());   // warm the history cache once
 
+   g_brokerOffsetHours = DetectBrokerOffsetHours();
+   JournalOpen();
+
    PrintFormat("POI_Retest_Engulf_EA init: symbol=%s pip=%.5f magic=%d risk_per_trade=%.2f%%",
                _Symbol, PipSize, (int)InpMagic, InpRiskPerTrade*100.0);
+   PrintFormat("Broker UTC offset: %+.1fh (%s). Session %02d:%02d-%02d:%02d UTC maps to %02d:%02d-%02d:%02d server time.",
+               g_brokerOffsetHours, InpAutoDetectBrokerOffset?"auto-detected":"manual",
+               InpSessionStartHourUTC, InpSessionStartMinUTC, InpSessionEndHourUTC, InpSessionEndMinUTC,
+               (int)((InpSessionStartHourUTC+(int)g_brokerOffsetHours+24)%24), InpSessionStartMinUTC,
+               (int)((InpSessionEndHourUTC  +(int)g_brokerOffsetHours+24)%24), InpSessionEndMinUTC);
    if(!InpIUnderstandTheRisk)
       Print("SAFETY: InpIUnderstandTheRisk is false - the EA will monitor but NEVER send an order until you set it to true.");
 
@@ -199,6 +289,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   if(g_journalHandle!=INVALID_HANDLE) { FileClose(g_journalHandle); g_journalHandle=INVALID_HANDLE; }
    Comment("");
 }
 
@@ -570,6 +661,12 @@ bool RunReplay(SSignal &outSig)
    ComputeATR(m15H, m15L, m15C, nM15, InpAtrPeriod, atrArr, atrValid);
 
    SPOI pois[]; ArrayResize(pois,0);
+   // (direction, origin_time) dedupe, mirroring POIDetector._seen in strategy.py.
+   // Without it every extra bar of a displacement leg re-admits the SAME origin
+   // candle; AdmitPOI then sees the identical zone as an overlap, invalidates the
+   // previous copy and appends a fresh CREATED one - silently resetting
+   // bars_outside / max_departure_pips / state part-way through the setup.
+   string seenIds[]; ArrayResize(seenIds,0);
    int m15Ptr=0;
    SSignal lastBarSignal; lastBarSignal.valid=false;
 
@@ -584,6 +681,11 @@ bool RunReplay(SSignal &outSig)
          {
             SPOI np;
             np.id = StringFormat("%s_%d", (cands[ci].dir==DIR_LONG?"L":"S"), (long)cands[ci].origin_time);
+            bool dup=false;
+            for(int sx=0; sx<ArraySize(seenIds); sx++)
+               if(seenIds[sx]==np.id) { dup=true; break; }
+            if(dup) continue;
+            int sn=ArraySize(seenIds); ArrayResize(seenIds,sn+1); seenIds[sn]=np.id;
             np.dir=cands[ci].dir; np.upper=cands[ci].hi; np.lower=cands[ci].lo;
             np.origin_time=cands[ci].origin_time; np.created_time=cands[ci].created_time;
             np.created_m5_index=i; np.strength=cands[ci].strength; np.state=ST_CREATED;
@@ -626,7 +728,7 @@ bool RunReplay(SSignal &outSig)
 //====================================================================
 void RollDayIfNeeded(datetime ts)
 {
-   datetime utcTs=(datetime)((long)ts - (long)(InpBrokerUtcOffsetHours*3600.0));
+   datetime utcTs=(datetime)((long)ts - (long)(g_brokerOffsetHours*3600.0));
    string day=TimeToString(utcTs, TIME_DATE);
    if(day!=g_lastDay)
    {
@@ -640,7 +742,7 @@ void RollDayIfNeeded(datetime ts)
 
 bool InSession(datetime ts)
 {
-   datetime utcTs=(datetime)((long)ts - (long)(InpBrokerUtcOffsetHours*3600.0));
+   datetime utcTs=(datetime)((long)ts - (long)(g_brokerOffsetHours*3600.0));
    MqlDateTime dt; TimeToStruct(utcTs, dt);
    if(dt.day_of_week<1 || dt.day_of_week>5) return false;   // Mon..Fri (MQL5: Sun=0)
    int curMin=dt.hour*60+dt.min;
@@ -718,6 +820,7 @@ int VolumeDecimals(double step)
 void LogVeto(string reason)
 {
    PrintFormat("signal vetoed: %s", reason);
+   JournalRow("veto:"+reason);
 }
 
 //====================================================================
@@ -733,6 +836,7 @@ void Process()
    if((double)sig.engulfTime <= lastTraded) return;   // restart-safety dedupe
 
    RollDayIfNeeded(sig.signalTime);
+   JournalReset(sig.signalTime, sig.dir, sig.poiId, sig.poiUpper, sig.poiLower);
 
    if(!InpIUnderstandTheRisk)
    {
@@ -753,6 +857,7 @@ void Process()
    double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
    double spreadPips=(ask-bid)/PipSize;
+   j_spread=spreadPips;
    if(spreadPips>InpMaxSpreadPips) { LogVeto("spread_too_wide"); return; }
 
    if(InpMaxTradesPerDay>0 && g_tradesToday>=InpMaxTradesPerDay) { LogVeto("max_trades_per_day"); return; }
@@ -775,9 +880,19 @@ void Process()
 
    double slDistance=MathAbs(entry-sl);
    double slPips=slDistance/PipSize;
+   j_entry=entry; j_sl=sl; j_slPips=slPips;
    double tol=1e-6;
    if(slPips>InpMaxSlPips+tol) { LogVeto(StringFormat("sl_exceeds_max (%.1f pips)",slPips)); return; }
    if(slPips<InpMinSlPips-tol) { LogVeto(StringFormat("sl_below_min (%.1f pips)",slPips)); return; }
+   // Cost drag is (spread+slippage)/stop.  A 4-pip stop against a 1-pip spread
+   // needs ~42% wins to break even on 1:2; the setup cannot deliver that, so the
+   // trade is a guaranteed slow loss rather than a bet.  Reject it explicitly.
+   if(InpMinStopSpreadMult>0 && slPips < InpMinStopSpreadMult*spreadPips - tol)
+   {
+      LogVeto(StringFormat("stop_too_tight_vs_spread (%.1f pips vs %.1f x %.1f)",
+                           slPips, InpMinStopSpreadMult, spreadPips));
+      return;
+   }
 
    long stopsLevelPoints=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    double point=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
@@ -791,6 +906,7 @@ void Process()
    double volMax=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
    double volStep=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
 
+   // ---- 1. risk-based size: total loss-if-stopped stays inside the budget ----
    double riskBudget=equity*InpRiskPerTrade;
    double moneyPerUnit=tickValue/tickSize;
    double lossPerLot=slDistance*moneyPerUnit;
@@ -803,11 +919,16 @@ void Process()
       lots=volMin;
    }
    lots=NormalizeDouble(lots, VolumeDecimals(volStep));
+   double riskLots=lots;
+   j_riskLots=riskLots;
 
-   // Cap lots to what the broker's margin requirement actually allows, instead
-   // of relying on OrderSend to reject with "No money" (TRADE_RETCODE_NO_MONEY):
-   // shrink by volStep until the order fits within free margin, or veto if even
-   // volMin does not fit.
+   // ---- 2. margin is a CONSTRAINT on that size, never a substitute for it ----
+   // Shrinking to fit free margin only ever lowers the risk taken, so it is safe
+   // to do - but it silently decouples size from the mandate: at 1:30 leverage a
+   // 200 EUR account can hold ~0.06 lots regardless of the stop, so every trade
+   // ends up the same notional and the realised risk becomes proportional to the
+   // stop distance, which is the inverse of what risk-based sizing is for.  Cap,
+   // but say so, and record it on the journal row so it shows up in analysis.
    ENUM_ORDER_TYPE orderType=longDir?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    double orderPrice=longDir?ask:bid;
    double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
@@ -823,6 +944,12 @@ void Process()
       LogVeto(StringFormat("insufficient_margin (free=%.2f required_at_min_lot=%.2f)", freeMargin, requiredMargin));
       return;
    }
+   j_lots=lots;
+   j_capped = (lots < riskLots-1e-9);
+   if(j_capped)
+      PrintFormat("WARNING: margin capped size %.4f -> %.4f lots (free=%.2f). Realised risk %.2f%% not %.2f%% - leverage, not the mandate, is sizing this trade.",
+                  riskLots, lots, freeMargin,
+                  100.0*(lots*lossPerLot)/MathMax(equity,1e-9), 100.0*InpRiskPerTrade);
 
    int digits=(int)_Digits;
    sl=NormalizeDouble(sl,digits);
@@ -850,6 +977,8 @@ void Process()
    }
    GlobalVariableSet(gvName, (double)sig.engulfTime);
    g_tradesToday++;
+   j_tp=tp;
+   JournalRow("order");
    PrintFormat("ORDER OK dir=%s ticket=%d price=%.5f sl=%.5f tp=%.5f lots=%.2f poi=%s",
                longDir?"LONG":"SHORT", (int)res.order, res.price, sl, tp, lots, sig.poiId);
 }

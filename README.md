@@ -216,6 +216,7 @@ Parameters most worth thinking about:
 | `retest.max_penetration_pct` | 1.0 | 1.0 = a wick may reach the distal edge |
 | `engulf.max_m5_bars_after_retest` | 6 | confirmation window |
 | `trade.max_sl_pips` | 20.0 | the hard rule; setups above it are rejected |
+| `trade.min_stop_spread_mult` | 8.0 | rejects stops so tight the spread eats the edge |
 | `risk.risk_per_trade` | 0.005 | 0.5 % |
 | `costs.spread_pips` | 0.8 | check against your broker's actual average |
 

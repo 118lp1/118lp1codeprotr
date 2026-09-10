@@ -72,6 +72,7 @@ trade:
   sl_buffer_pips: 1.0
   max_sl_pips: 20.0
   min_sl_pips: 3.0
+  min_stop_spread_mult: 8.0
   max_holding_m5_bars: 288
   close_at_session_end: false
 session:
@@ -88,10 +89,10 @@ session:
   block_minutes_after_open: 0
   block_minutes_before_close: 0
 risk:
-  risk_per_trade: 0.1
+  risk_per_trade: 0.005
   max_open_positions: 1
-  max_trades_per_day: 4
-  max_daily_loss_pct: 0.35
+  max_trades_per_day: 3
+  max_daily_loss_pct: 0.02
   max_consecutive_losses: 4
   cooldown_m5_bars_after_loss: 3
   cooldown_m5_bars_after_any: 0

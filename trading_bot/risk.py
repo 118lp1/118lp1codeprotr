@@ -149,6 +149,14 @@ def build_order(sig: Signal, next_open: float, equity: float, cfg: Config,
         return OrderPlan(False, "sl_below_min", sl_pips=sl_pips)
     if spec.stops_level_points and sl_distance < spec.stops_level_points * spec.point:
         return OrderPlan(False, "below_broker_stops_level", sl_pips=sl_pips)
+    # A stop only a spread or two wide needs a win rate the setup cannot deliver:
+    # at 1:2 the breakeven is (1 + c/R)/3, so R = 4c already demands 41.7 %.  The
+    # 20-pip cap selects *for* these trades, so without this floor the surviving
+    # sample is concentrated in exactly the setups that cannot win.
+    if cfg.trade.min_stop_spread_mult > 0:
+        eff_spread = cfg.costs.spread() if spread_pips is None else spread_pips
+        if sl_pips < cfg.trade.min_stop_spread_mult * eff_spread - tol:
+            return OrderPlan(False, "stop_too_tight_vs_spread", sl_pips=sl_pips)
 
     tp = take_profit_price(entry, sl, sig.direction, cfg)
     volume, risk_amount = position_size(equity, sl_distance, cfg)
