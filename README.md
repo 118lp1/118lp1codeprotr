@@ -215,7 +215,9 @@ Parameters most worth thinking about:
 | `retest.min_departure_pips` | 8.0 | how far price must leave before returning |
 | `retest.max_penetration_pct` | 1.0 | 1.0 = a wick may reach the distal edge |
 | `engulf.max_m5_bars_after_retest` | 6 | confirmation window |
-| `trade.max_sl_pips` | 20.0 | the hard rule; setups above it are rejected |
+| `trade.max_sl_atr_mult` | 2.5 | stop ceiling in the POI's own volatility (replaces the fixed 20 pips) |
+| `trade.min_stop_spread_mult` | 8.0 | rejects stops so tight the spread eats the edge |
+| `trade.max_entry_dist_atr` | 1.0 | how far past the zone the fill may sit |
 | `risk.risk_per_trade` | 0.005 | 0.5 % |
 | `costs.spread_pips` | 0.8 | check against your broker's actual average |
 

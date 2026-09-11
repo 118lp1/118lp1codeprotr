@@ -44,6 +44,7 @@ class POI:
     created_time: pd.Timestamp      # instant it became KNOWN (= M15 bar_end)
     created_m5_index: int = -1
     strength: float = 0.0           # impulse size in ATR units
+    atr_origin: float = 0.0         # ATR (price units) at the origin bar
     state: str = CREATED
     # --- lifecycle bookkeeping ---
     bars_outside: int = 0
@@ -136,12 +137,13 @@ class POIDetector:
         return c.min_zone_width_pips <= w <= c.max_zone_width_pips
 
     def _mk(self, direction: Direction, lo: float, hi: float, origin_time,
-            created_time, strength: float, ptype: POIType) -> POI:
+            created_time, strength: float, ptype: POIType,
+            atr_origin: float = 0.0) -> POI:
         pad = self.cfg.poi.zone_padding_pips * self.pip
         return POI(poi_id=f"POI{next(self._ids):05d}", direction=direction,
                    poi_type=ptype, upper=hi + pad, lower=lo - pad,
                    origin_time=origin_time, created_time=created_time,
-                   strength=strength)
+                   strength=strength, atr_origin=float(atr_origin))
 
     # -- order block (PRIMARY) --------------------------------------------- #
     def _order_blocks(self, j: int) -> List[POI]:
@@ -205,7 +207,8 @@ class POIDetector:
                 lo, hi = l_[o], h_[o]
             out.append(self._mk(Direction.LONG if bullish else Direction.SHORT,
                                 lo, hi, m["timestamp"].iloc[o], created,
-                                float(impulse / a), POIType.ORDER_BLOCK))
+                                float(impulse / a), POIType.ORDER_BLOCK,
+                                atr_origin=float(a)))
         return out
 
     def _broke_structure(self, j: int, o: int, bullish: bool) -> bool:

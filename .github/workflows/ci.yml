@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # MetaTrader5 is markered to Windows in requirements.txt, so it is skipped
+      # here; optuna/plotly/scikit-learn are optional and the code degrades
+      # gracefully without them.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: python tests/run_tests.py
+
+  compile-ea:
+    name: Compile MQL5 EA
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download MetaTrader 5 installer
+        shell: pwsh
+        run: |
+          curl.exe -L --fail --retry 3 -o mt5setup.exe `
+            https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe
+          Get-Item mt5setup.exe | Format-List Name,Length
+
+      # /auto installs without UI. The installer can return before it has
+      # finished laying files down, so poll for metaeditor64.exe rather than
+      # trusting the exit.
+      - name: Install MetaEditor
+        shell: pwsh
+        run: |
+          Start-Process -FilePath .\mt5setup.exe -ArgumentList '/auto' -Wait
+          $editor = $null
+          foreach ($i in 1..30) {
+            $editor = Get-ChildItem -Path 'C:\Program Files','C:\Program Files (x86)' `
+              -Filter metaeditor64.exe -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($editor) { break }
+            Start-Sleep -Seconds 10
+          }
+          if (-not $editor) { throw 'metaeditor64.exe not found after install' }
+          Write-Host "found: $($editor.FullName)"
+          "METAEDITOR=$($editor.FullName)" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # the installer launches the terminal; it holds files open
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      # MetaEditor writes a UTF-16 log and its exit code is not a reliable
+      # pass/fail signal, so the real test is whether an .ex5 came out.
+      - name: Compile
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:GITHUB_WORKSPACE 'mql5\POI_Retest_Engulf_EA.mq5'
+          $ex5 = [System.IO.Path]::ChangeExtension($src, 'ex5')
+          $log = Join-Path $env:GITHUB_WORKSPACE 'mql5\compile.log'
+          if (Test-Path $ex5) { Remove-Item $ex5 -Force }
+          Start-Process -FilePath $env:METAEDITOR -Wait -NoNewWindow `
+            -ArgumentList "/compile:`"$src`"", "/log:`"$log`""
+          if (Test-Path $log) {
+            Write-Host '---------------- compile log ----------------'
+            Get-Content $log -Encoding Unicode | Write-Host
+            Write-Host '---------------------------------------------'
+          } else {
+            Write-Host 'no compile log was produced'
+          }
+          if (-not (Test-Path $ex5)) { throw 'compilation failed: no .ex5 produced' }
+          Write-Host "OK: $ex5 ($((Get-Item $ex5).Length) bytes)"
+
+      - name: Upload compiled EA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: POI_Retest_Engulf_EA
+          path: |
+            mql5/*.ex5
+            mql5/compile.log
+          if-no-files-found: warn
